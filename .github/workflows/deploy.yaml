@@ -1,0 +1,115 @@
+name: Deploy AI agents to k8s
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        default: 'false'
+      run_build:
+        default: 'true'
+permissions:
+  contents: read
+  packages: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Clear GitHub token credentials
+        run: |
+          git config --unset-all http.https://github.com/.extraheader || true
+          git config --global --unset-all http.extraheader || true
+      - name: Push clean shallow to personal repo
+        run: |
+          git config --global user.name 'Marian505'
+          git config --global user.email 'marian.cakajda@gmail.com'
+          git remote add public https://x-access-token:${{ secrets.PERSONAL_PAT }}@github.com/marian505/ai-agents.git || true
+          git remote set-url public https://x-access-token:${{ secrets.PERSONAL_PAT }}@github.com/marian505/ai-agents.git || true
+          git checkout --orphan clean-main
+          git add -A
+          git commit -m "Shallow sync $(date)"
+          git push public clean-main:main --force
+  test:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_tests == 'true' }} 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Install tools
+        run: pip install uv
+      - name: Install dependencies
+        run: uv sync
+      - name: Run tests
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: ai-agents-tests
+          LANGSMITH_TRACING: true
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LANGGRAPH_AUTH_TYPE: noop
+        run: uv run pytest tests/ -s -v -n 5
+  build:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_build == 'true' }} 
+    steps:
+      - name: Lowercase repo repo
+        run: echo "REPO=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN  }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tools
+        run: pip install "langgraph-cli[inmem]" uv
+      - name: Install dependencies
+        run: uv sync
+      - name: Generate Dockerfile
+        run: uv run langgraph dockerfile Dockerfile.langgraph
+      - name: Build agents
+        env:
+          DOCKER_BUILDKIT: 0
+        run: docker build -f Dockerfile.langgraph -t agents:latest .
+      - name: Tag image for GHCR
+        run: docker tag agents:latest ghcr.io/${{ env.REPO }}:latest
+      - name: Push image to GHCR
+        run: docker push ghcr.io/${{ env.REPO }}:latest
+  deploy:
+    needs: build
+    runs-on: self-hosted
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    - name: Lowercase repo repo
+      run: echo "REPO=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+    - name: Pull image from GHCR
+      run: sudo ctr -n k8s.io images pull --user ${{ github.actor }}:${{ secrets.GITHUB_TOKEN }} ghcr.io/mycodedynamic/new-agent:latest
+    - name: Cleanup previous Helm release
+      run: |
+        helm -n dev uninstall ai-agent --no-hooks || true
+        kubectl delete pod -l app.kubernetes.io/instance=ai-agent -n dev --force --grace-period=0 --ignore-not-found || true
+    - name: Deploy Helm chart
+      run: |
+        helm upgrade --install ai-agent ./helm \
+          --set env.PORT="8000" \
+          --set env.POSTGRES_URI="postgres://postgres:postgres@langgraph-cloud-postgres.dev.svc.cluster.local:5432/postgres" \
+          --set env.POSTGRES_STORE="postgresql+psycopg://postgres:postgres@langgraph-cloud-postgres.dev.svc.cluster.local:5432/rag" \
+          --set env.REDIS_URI="redis://langgraph-cloud-redis.dev.svc.cluster.local:6379" \
+          --set env.LANGSMITH_API_KEY="${{ secrets.LANGSMITH_API_KEY }}" \
+          --set env.LANGSMITH_PROJECT="ai-agents-dev" \
+          --set env.TAVILY_API_KEY="${{ secrets.TAVILY_API_KEY }}" \
+          --set env.ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_API_KEY }}" \
+          --set env.GOOGLE_API_KEY="${{ secrets.GOOGLE_API_KEY }}" \
+          --set env.OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+          --set env.LANGGRAPH_AUTH_TYPE="noop" 

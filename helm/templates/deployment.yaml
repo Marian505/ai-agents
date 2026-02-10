@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-agent
+  namespace: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: ai-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-agent
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/instance: ai-agent
+    spec:
+      containers:
+      - name: ai-agent
+        image: ghcr.io/mycodedynamic/new-agent:latest
+        imagePullPolicy: Never
+        resources:
+          requests:
+            memory: "500Mi"
+            cpu: "500m"
+          limits:
+            memory: "1000Mi"
+        ports:
+          - containerPort: 8000
+        env:
+        {{- range $name, $value := .Values.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
