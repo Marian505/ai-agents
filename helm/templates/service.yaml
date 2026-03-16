@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-agent
+  namespace: dev
+  labels:
+    pool: homelab
+  annotations:
+    lbipam.cilium.io/names: "homelab-pool" 
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/instance: ai-agent
+  ports:
+  - port: 8000
+    targetPort: 8000
+
